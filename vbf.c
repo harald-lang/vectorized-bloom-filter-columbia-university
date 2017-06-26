@@ -76,7 +76,8 @@
 uint64_t thread_time(void)
 {
 	struct timespec t;
-	assert(clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t) == 0);
+	//assert(clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t) == 0);
+	clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
 	return t.tv_sec * 1000 * 1000 * 1000 + t.tv_nsec;
 }
 
