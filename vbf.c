@@ -69,6 +69,8 @@
 #include <ctype.h>
 #include <math.h>
 #include <immintrin.h>
+#include <x86intrin.h>
+
 #undef _GNU_SOURCE
 
 
@@ -691,6 +693,7 @@ typedef struct {
 	uint8_t log_filter_size;     // log (Bloom filter bits)
 	int32_t *factors;            // multiplicative factors
 	uint64_t times[4];           // time per method
+	uint64_t cycles[4];          // cycles per method
 	double filter_rate;          // rate of qualifying tuples
 	size_t errors;               // number of false positives
 	size_t passed;               // number of tuples that qualified
@@ -812,13 +815,20 @@ void *run(void *arg)
 		pthread_barrier_wait(&d->barriers[m + m + 1]);
 		// run method with thread local timing
 		uint64_t t = thread_time();
-		r = method[m](keys, vals, local_outer_tuples, filter, factors,
-	                  functions, log_filter_size, keys_out, vals_out);
+		uint64_t tsc_begin = _rdtsc();
+		const char* env = getenv("REPEAT_CNT");
+		const uint64_t repeat_cnt = atoi(env);
+		for (uint64_t rep = 0; rep < repeat_cnt; rep++) {
+			r = method[m](keys, vals, local_outer_tuples, filter, factors,
+										functions, log_filter_size, keys_out, vals_out);
+		}
+		uint64_t tsc_end = _rdtsc();
 		t = thread_time() - t;
 		// sync all threads again
 		pthread_barrier_wait(&d->barriers[m + m + 2]);
 		// save and check results
-		d->times[m] = t;
+		d->times[m] = t / repeat_cnt;
+		d->cycles[m] = (tsc_end - tsc_begin) / repeat_cnt;
 		if (m) assert(r == d->passed);
 		int32_t s = 0, o = 0;
 		for (i = e = 0 ; i != r ; ++i) {
@@ -975,21 +985,28 @@ int main(int argc, char **argv)
 		pthread_create(&info[t].id, NULL, run, (void*) &info[t]);
 	}
 	// wait for threads to finish and gather timing results
-	uint64_t errors = 0, passed = 0, times[4] = {0, 0, 0, 0};
+	uint64_t errors = 0, passed = 0, times[4] = {0, 0, 0, 0}, cycles[4] = {0, 0, 0, 0};
 	for (t = 0 ; t != threads ; ++t) {
 		pthread_join(info[t].id, NULL);
-		for (i = 0 ; i != 4 ; ++i)
+		for (i = 0 ; i != 4 ; ++i) {
 			times[i] += info[t].times[i];
+			cycles[i] += info[t].cycles[i];
+		}
 		errors += info[t].errors;
 		passed += info[t].passed;
 	}
+
 	// print results
 	fprintf(stderr, "Measured filter rate: %.5f%%\n", (passed - errors) * 100.0 / outer_tuples);
 	fprintf(stderr, "Measured error  rate: %.5f%%\n", errors * 100.0 / (outer_tuples - (passed - errors)));
-	fprintf(stderr, "Scalar soft: %7.2f mtps\n", outer_tuples * 1000.0 / (times[0] / threads));
-	fprintf(stderr, "Scalar hard: %7.2f mtps\n", outer_tuples * 1000.0 / (times[1] / threads));
-	fprintf(stderr, "SIMD single: %7.2f mtps\n", outer_tuples * 1000.0 / (times[2] / threads));
-	fprintf(stderr, "SIMD double: %7.2f mtps\n", outer_tuples * 1000.0 / (times[3] / threads));
+	fprintf(stderr, "Scalar soft: %7.2f mtps\n", (outer_tuples * 1000.0) / ((times[0] * 1.0) / threads));
+	fprintf(stderr, "Scalar hard: %7.2f mtps\n", (outer_tuples * 1000.0) / ((times[1] * 1.0) / threads));
+	fprintf(stderr, "SIMD single: %7.2f mtps\n", (outer_tuples * 1000.0) / ((times[2] * 1.0) / threads));
+	fprintf(stderr, "SIMD double: %7.2f mtps\n", (outer_tuples * 1000.0) / ((times[3] * 1.0) / threads));
+	fprintf(stderr, "Scalar soft: %7.6f cycles/outer tuple\n", (cycles[0] * 1.0 / outer_tuples) / threads);
+	fprintf(stderr, "Scalar hard: %7.6f cycles/outer tuple\n", (cycles[1] * 1.0 / outer_tuples) / threads);
+	fprintf(stderr, "SIMD single: %7.6f cycles/outer tuple\n", (cycles[2] * 1.0 / outer_tuples) / threads);
+	fprintf(stderr, "SIMD double: %7.6f cycles/outer tuple\n", (cycles[3] * 1.0 / outer_tuples) / threads);
 	// cleanup and exit
 	for (t = 0 ; t != 9 ; ++t)
 		pthread_barrier_destroy(&barriers[t]);
